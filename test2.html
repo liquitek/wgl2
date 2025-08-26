@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGL2 Камера от первого лица</title>
+    <style>
+        canvas { display: block; margin: auto; }
+        body, html { margin: 0; height: 100%; overflow: hidden; }
+    </style>
+</head>
+<body style="
+    position: fixed;
+    inset: 0;
+    height: auto;
+">
+    <canvas id="glCanvas"></canvas>
+<div style="
+    position: absolute;
+    inset: 1rem;
+    pointer-events: none;
+    outline: 1rem solid #0808;
+    border-radius: .3rem;
+    outline-offset: .5rem;
+    border: .11rem dashed #080f;
+    display: flex;
+">
+<div style="margin: auto;width: .66rem;height: .66rem;border-radius: 100%;box-shadow: 0 0 2mm 2mm #fff4;outline: .5mm solid #fff7;outline-offset: -1mm;">
+</div>
+</div>
+
+<script>
+        const scaleFactor = 2;
+        const SQRT2 = 1/Math.sqrt(2);
+        const SQRT3 = 1/Math.sqrt(3);
+        let RENDER=true;
+        let MOVE_CAMERA = false;
+        const keysPressed = {};
+       /* const vec3 = glMatrix.vec3;*/
+        window.requestAnimFrame = (function(){
+            return window.requestAnimationFrame ||
+                window.webkitRequestAnimationFrame ||
+                window.mozRequestAnimationFrame ||
+                function(callback){
+                    window.setTimeout(() => callback(performance.now()), 1000 / 60);
+                };
+        })();
+        const canvas = document.getElementById('glCanvas');
+        const gl = canvas.getContext('webgl2');
+
+        if (!gl) {
+            alert('WebGL2 не поддерживается вашим браузером');
+        }
+        let ext = gl.getExtension('EXT_color_buffer_float');
+        if (!ext) {
+            console.error('EXT_color_buffer_float is not supported.');
+        }
+        if (!gl.getExtension('EXT_float_blend')) {
+            console.error('EXT_float_blend is not supported.');
+        }
+
+function lockCursor() {
+    canvas.requestPointerLock();
+}
+
+canvas.addEventListener('click', lockCursor);
+
+gl.clearColor(0.0, 0.0, 0.0, 1.0);
+
+const gBuffer = {};
+
+gBuffer.frameBuffer = gl.createFramebuffer();
+gBuffer.posBuffer = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, gBuffer.posBuffer);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gBuffer.normalBuffer = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, gBuffer.normalBuffer);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gBuffer.colorBuffer = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, gBuffer.colorBuffer);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gBuffer.depthBuffer = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, gBuffer.depthBuffer);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+const CAMERA_BINDING_POINT = 0;
+let SWAP_CAM_BUFFERS=false;
+let [cameraBuffer1,cameraBuffer2]= [gl.createBuffer(),gl.createBuffer()];
+const cameraData = new Float32Array(20);
+gl.bindBuffer(gl.UNIFORM_BUFFER,cameraBuffer1);
+gl.bufferData(gl.UNIFORM_BUFFER,80,gl.DYNAMIC_DRAW);
+gl.bindBuffer(gl.UNIFORM_BUFFER,cameraBuffer2);
+gl.bufferData(gl.UNIFORM_BUFFER,80,gl.DYNAMIC_DRAW);
+
+
+function resizeHandler() {
+
+            RENDER=false;
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            gl.bindTexture(gl.TEXTURE_2D, gBuffer.posBuffer);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, canvas.width*scaleFactor, canvas.height*scaleFactor, 0, gl.RGBA, gl.FLOAT, null);
+            gl.bindTexture(gl.TEXTURE_2D, gBuffer.normalBuffer);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, canvas.width*scaleFactor, canvas.height*scaleFactor, 0, gl.RGBA, gl.FLOAT, null);
+            gl.bindTexture(gl.TEXTURE_2D, gBuffer.colorBuffer);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, canvas.width*scaleFactor, canvas.height*scaleFactor, 0, gl.RGBA, gl.FLOAT, null);
+            gl.bindTexture(gl.TEXTURE_2D, gBuffer.depthBuffer);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT32F,  canvas.width*scaleFactor, canvas.height*scaleFactor, 0, gl.DEPTH_COMPONENT, gl.FLOAT,null);
+
+            projectionMatrix = perspectiveMatrix(Math.PI / 5, canvas.width / canvas.height, 0.1, 10000.0);
+            RENDER=true;
+        }
+
+
+const cube = generateSmoothCube(5); /* возвращает {verticies,normals,indicies} */
+
+        const gVertexShaderSource = `#version 300 es
+precision highp float;
+in vec3 position;
+in vec3 normal;
+in vec2 texCoord;
+
+layout(std140) uniform Camera {
+    mat4 viewMatrix;
+    vec3 viewPosition;
+};
+
+
+
+uniform mat4 model;
+uniform mat4 projection;
+out vec3 fragPos;
+out vec3 fragNormal;
+out vec2 fragTexCoord;
+/*out float depth;*/
+
+/*
+mat4 translate(vec3 pos) {
+                return mat4(
+                    1, 0, 0, 0,
+                    0, 1, 0, 0,
+                    0, 0, 1, 0,
+                    -pos.x, -pos.y, -pos.z, 1
+                );
+            }
+                
+float linearizeDepth(float d, float A) {
+    return (1.0-A)/(1.0-A*d);
+}
+    */
+void main() {
+    vec4 worldPos = model * vec4(position, 1.0);
+
+    /*mat4 view = viewRotation * translate(viewPosition);*/
+
+   /*gl_Position = projection * view * worldPos;*/
+
+    gl_Position = projection * viewMatrix * worldPos; 
+    
+    fragPos = worldPos.xyz;
+
+    /*fragNormal = mat3(inverse(transpose(model))) * normal;*/
+
+    fragNormal = mat3(model) * normal;
+    fragTexCoord = texCoord;
+
+  /*  depth = linearizeDepth(gl_Position.z,projection[2][2]); */
+}
+`;
+const gFragmentShaderSource = `#version 300 es
+precision highp float;
+
+in vec3 fragPos;
+in vec3 fragNormal;
+in vec2 fragTexCoord;
+/*in float depth;*/
+
+layout(location = 0) out vec4 gPosition;
+layout(location = 1) out vec4 gNormal;
+layout(location = 2) out vec4 gColor;
+
+
+
+uniform sampler2D textureSampler;
+
+void main() {
+        gPosition = vec4(fragPos, 1.0);
+
+        /*float d = gl_FragCoord.z;*/
+
+        gNormal = vec4(fragNormal, 1.0);
+        gColor = texture(textureSampler, fragTexCoord);
+
+        /*gColor = vec4(vec3(depth),1.0);*/
+        
+}`;
+const lVertexShaderSource = `#version 300 es
+precision highp float;
+
+in vec2 position; // Позиция на экране
+
+out vec2 texCoord; // Координаты текстуры
+
+void main() {
+    texCoord = position * 0.5 + 0.5; // Нормализуем координаты 
+    gl_Position = vec4(position, 0.0, 1.0); // Проекция прямоугольника на экран
+}
+`;
+const lFragmentShaderSource = `#version 300 es
+precision highp float;
+in vec2 texCoord;
+out vec4 fragColor;
+
+layout(std140) uniform Camera {
+    mat4 viewMatrix;
+    vec3 viewPosition;
+};
+
+uniform sampler2D gPosition;
+uniform sampler2D gNormal;
+uniform sampler2D gColor;
+
+uniform vec3 lightPos;
+uniform vec3 lightColor;
+uniform vec3 ambLightColor;
+/*
+mat4 translate(vec3 pos) {
+                return mat4(
+                    1, 0, 0, 0,
+                    0, 1, 0, 0,
+                    0, 0, 1, 0,
+                    -pos.x, -pos.y, -pos.z, 1
+                );
+            }
+*/
+void main() {
+    vec3 pos = texture(gPosition, texCoord).xyz;
+    vec3 normal = texture(gNormal, texCoord).xyz;
+    vec4 albedo = texture(gColor, texCoord).rgba;
+
+    // Освещение
+    vec3 lightDir = normalize(lightPos - pos);
+   
+   vec3 viewDir = normalize(viewPosition - pos);
+
+    /* vec3 viewDir = normalize(-viewRotation[3].xyz - pos);*/
+    /*viewDir = normalize(-mat3(viewRotation)[2]); */
+
+    vec3 reflectDir = reflect(-lightDir, normal);
+
+    vec3 diff = lightColor * max(dot(normal, lightDir), 0.0);
+    /*vec3 diff = lightColor * dot(normal, lightDir);*/
+    vec3 spec = lightColor * pow(max(dot(viewDir, reflectDir),0.0), 32.0);
+    /*vec3 spec = lightColor * pow(dot(viewDir, reflectDir), 32.0);*/
+    vec3 lighting = albedo.rgb * (diff + spec) + ambLightColor * albedo.rgb;
+    lighting /= max(1.0, length(lighting));
+    fragColor = vec4(lighting,1.0);
+}`;
+
+        // Компиляция шейдеров
+        function compileShader(source, type) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error(`Ошибка компиляции шейдера: ${shader}`, gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+function geometryPass() {
+
+    
+    gl.bindFramebuffer(gl.FRAMEBUFFER, gBuffer.frameBuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, gBuffer.posBuffer, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, gBuffer.normalBuffer, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, gBuffer.colorBuffer, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, gBuffer.depthBuffer, 0);
+    
+    gl.useProgram(geometryPassProgram);  // Программа для первого прохода
+
+    gl.uniformMatrix4fv(projectionLocation, false, projectionMatrix);
+    gl.uniformMatrix4fv(modelLocation, false, modelMatrix);
+
+    bindModelData(cube); // Привязка вершин и нормалей модели
+    bindModelTextures(cube);
+
+    // Устанавливаем буферы, которые будем рисовать
+    gl.drawBuffers([
+    gl.COLOR_ATTACHMENT0, // Позиции
+    gl.COLOR_ATTACHMENT1, // Нормалиv
+    gl.COLOR_ATTACHMENT2,  // Цвет
+    ]);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT );
+
+    gl.drawElements(gl.TRIANGLES, cube.indices.length, gl.UNSIGNED_SHORT, 0);
+ 
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+}
+
+// 5. Lighting Pass — расчёт освещения
+function lightingPass() {
+
+    gl.useProgram(lightingPassProgram);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, gBuffer.posBuffer);
+    gl.uniform1i(gl.getUniformLocation(lightingPassProgram, 'gPosition'), 0);
+    
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, gBuffer.normalBuffer);
+    gl.uniform1i(gl.getUniformLocation(lightingPassProgram, 'gNormal'), 1);
+    
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, gBuffer.colorBuffer);
+    gl.uniform1i(gl.getUniformLocation(lightingPassProgram, 'gColor'), 2);
+
+    gl.uniform3fv(lightPosLoc,[10.0,10.0,10.0]);
+    gl.uniform3fv(lightColorLoc,[1,0,0]);
+    gl.uniform3fv(ambLightLoc,[0.1,0.1,0.5]);
+    
+    // Рисуем экранный квад (fullscreen quad)
+
+    drawScreenQuad();
+}
+const screenQuad = new Float32Array([
+    -1.0, -1.0,   // Нижний левый угол
+     1.0, -1.0,   // Нижний правый угол
+    -1.0,  1.0,   // Верхний левый угол
+     1.0,  1.0    // Верхний правый угол
+]);
+const scrQBuffer = gl.createBuffer();
+
+function drawScreenQuad() {
+    gl.bindBuffer(gl.ARRAY_BUFFER, scrQBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, screenQuad, gl.STATIC_DRAW);
+    const positionAttrib = gl.getAttribLocation(lightingPassProgram, "position");
+    gl.vertexAttribPointer(positionAttrib, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(positionAttrib);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); // Используем TRIANGLE_STRIP для прямоугольника
+}
+
+function createShaderProgram(vertexSource, fragmentSource) {
+    const vertexShader = compileShader(vertexSource, gl.VERTEX_SHADER);
+    const fragmentShader = compileShader(fragmentSource, gl.FRAGMENT_SHADER);
+    const program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(program));
+        return null;
+    }
+    return program;
+}
+function bindModelData(model) {
+    // 1. Привязка вершин (position)
+    let offset=0;
+    const vertexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([...model.normals,...model.vertices,...model.texcoords]), gl.STATIC_DRAW);
+
+    const normalAttrib = gl.getAttribLocation(geometryPassProgram, "normal");
+    gl.vertexAttribPointer(normalAttrib, 3, gl.FLOAT, false, 0, offset);
+    gl.enableVertexAttribArray(normalAttrib);
+    offset += model.normals.length*4;
+    const positionAttrib = gl.getAttribLocation(geometryPassProgram, "position");
+    gl.vertexAttribPointer(positionAttrib, 3, gl.FLOAT, false, 0, offset);
+    gl.enableVertexAttribArray(positionAttrib);
+    offset += model.vertices.length*4;
+    /*console.log(offset);*/
+    const texCoordAttrib = gl.getAttribLocation(geometryPassProgram, "texCoord");
+    gl.vertexAttribPointer(texCoordAttrib, 2, gl.FLOAT, false, 0, offset);
+    gl.enableVertexAttribArray(texCoordAttrib);
+
+    // 3. Привязка индексов (indices)
+    const indexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, model.indices, gl.STATIC_DRAW);
+}
+
+function bindModelTextures(model) {
+    gl.activeTexture(gl.TEXTURE0); // Активируем текстурный юнит 0
+    gl.bindTexture(gl.TEXTURE_2D, model.texture); // Привязываем текстуру модели
+    gl.uniform1i(gl.getUniformLocation(geometryPassProgram, "textureSampler"), 0); // Сообщаем шейдеру
+}
+
+
+        const geometryPassProgram = createShaderProgram(gVertexShaderSource,gFragmentShaderSource);
+        const lightingPassProgram = createShaderProgram(lVertexShaderSource,lFragmentShaderSource);
+
+        const projectionLocation = gl.getUniformLocation(geometryPassProgram , 'projection');
+        const modelLocation = gl.getUniformLocation(geometryPassProgram , 'model');
+
+        const lightPosLoc= gl.getUniformLocation(lightingPassProgram  ,'lightPos');
+        const lightColorLoc = gl.getUniformLocation(lightingPassProgram  ,'lightColor');
+        const ambLightLoc = gl.getUniformLocation(lightingPassProgram  ,'ambLightColor');
+
+        gl.uniformBlockBinding(geometryPassProgram, gl.getUniformBlockIndex(geometryPassProgram, 'Camera'), CAMERA_BINDING_POINT);
+        gl.uniformBlockBinding(lightingPassProgram, gl.getUniformBlockIndex(lightingPassProgram, 'Camera'), CAMERA_BINDING_POINT);
+        // Матрица перспективы
+
+function perspectiveMatrix(fov, aspect, near, far) {
+            const f = 1.0 / Math.tan(fov / 2);
+            return new Float32Array([
+                f / aspect, 0, 0, 0,
+                0, f, 0, 0,
+                0, 0, (far + near) / (near - far), -1,
+                0, 0, (2 * far * near) / (near - far), 0
+            ]);
+        }
+
+        // Матрица модели (единичная)
+const modelMatrix = new Float32Array([
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1
+]);
+        
+
+let projectionMatrix;
+
+window.addEventListener("resize",resizeHandler);
+
+/*
+        function subtractVectors(a, b) {
+            return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        }
+
+        function addVectors(a, b) {
+            return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+        }
+
+        function cross(a, b) {
+            return [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0]
+            ];
+        }
+
+        function dot(a, b) {
+            return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        }
+
+function quatFromAxisAngle(axis, angle) {
+    const halfAngle = angle / 2;
+    const s = Math.sin(halfAngle);
+    return [
+        axis[0] * s,
+        axis[1] * s,
+        axis[2] * s,
+        Math.cos(halfAngle)
+    ];
+}
+
+function quatMultiply(q1, q2) {
+    return [
+        q1[3] * q2[0] + q1[0] * q2[3] + q1[1] * q2[2] - q1[2] * q2[1],
+        q1[3] * q2[1] + q1[1] * q2[3] + q1[2] * q2[0] - q1[0] * q2[2],
+        q1[3] * q2[2] + q1[2] * q2[3] + q1[0] * q2[1] - q1[1] * q2[0],
+        q1[3] * q2[3] - q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2]
+    ];
+}
+*/
+
+let cameraPos = [0, 0, 20];
+let deltaTime;
+let lastTime;
+let cameraQuat = new Float32Array([0, 0, 0, 1]);  // Единичный кватернион (без поворота)
+let camMoveSpeed = .05;
+let rotateSpeed = 0.0000666;
+let viewRotationMatrix;
+//updateQuaternion([0,0,0]);
+const worker = new Worker('enter-the-matrix2.js');
+
+function handleInput(eventData) {
+    updateNeeded = true;
+
+    if (eventData) {
+        latestInput[3] = 1; // rotation
+        if (!eventData.ctrlKey) {
+            latestInput[0] = deltaTime * rotateSpeed * eventData.movementY*(-2*Math.PI); // rotation delta of Camera X axis
+            latestInput[1] = deltaTime * rotateSpeed * eventData.movementX*(-2*Math.PI); // Y axis
+            latestInput[2] = 0;                                            // Z axis
+        } else {
+            latestInput[0] = 0;
+            latestInput[1] = 0;
+            latestInput[2] = deltaTime * rotateSpeed * eventData.movementX*(-2*Math.PI); 
+        }
+    } else {
+        var moveDelta = deltaTime*camMoveSpeed;
+        var [dx,dy,dz] = [0,0,0];
+            
+            if (!keysPressed['ShiftLeft']&&keysPressed['KeyS']) 
+                dz++;
+                    
+            if (!keysPressed['ShiftLeft']&&keysPressed['KeyW'])
+                dz--;
+            if (keysPressed['KeyD']) 
+                dx++
+                    
+            if (keysPressed['KeyA']) 
+                dx--;
+                    
+            if (keysPressed['ShiftLeft']&&keysPressed['KeyW'])
+                dy++;
+                    
+            if (keysPressed['ShiftLeft']&&keysPressed['KeyS'])
+                dy--;
+
+            var s=dx>0?dx:-dx;
+            s+=dy>0?dy:-dy;
+            s+=dz>0?dz:-dz;
+
+            s=s||1;
+            s==2&&(s=SQRT2);
+            s==3&&(s=SQRT3); 
+
+            dx*=s*moveDelta;
+            dy*=s*moveDelta;
+            dz*=s*moveDelta;
+            latestInput.set([dx,dy,dz,0]);
+    }
+
+    if (!processing) {
+        startProcessing(latestInput);
+    }
+}
+
+let processing = false;
+let updateNeeded = false;
+let latestInput = new Float32Array(4); // Более подходящий тип
+
+function startProcessing(input) {
+    if (processing) {
+        updateNeeded = true;
+        latestInput.set(input);  // Без перезаписи ссылки
+        return;
+    }
+
+    processing = true;
+    worker.postMessage(latestInput);
+}
+
+let UBOData;
+
+worker.addEventListener('message', function (event) {
+  if (event.data.matrixMemory) {
+
+    uboDATA = new Float32Array(event.data.matrixMemory,16,19);
+    console.log('Received SharedArray:', event.data.matrixMemory);
+    gl.bindBuffer(gl.UNIFORM_BUFFER, cameraBuffer2);
+    gl.bufferSubData(gl.UNIFORM_BUFFER,0, uboDATA);
+    console.log('uboDATA:', uboDATA);
+    SWAP_CAM_BUFFERS=true;
+    resizeHandler();
+    gl.enable(gl.DEPTH_TEST);
+    gl.enable(gl.BLEND);
+    gl.enable(gl.CULL_FACE);
+    render();
+    // Устанавливаем постоянный обработчик для последующих сообщений
+    worker.addEventListener('message', handleWorkerMessages);
+  }
+}, { once: true });
+
+// Обработчик ответа от воркера
+function handleWorkerMessages (message) {
+
+    if (updateNeeded) {
+        updateNeeded = false;
+        worker.postMessage(latestInput);
+        /*processing = true;*/
+    } else {
+        try {
+            gl.bindBuffer(gl.UNIFORM_BUFFER, cameraBuffer2);
+            gl.bufferSubData(gl.UNIFORM_BUFFER, 0, uboDATA); // Запись данных в буфер
+            SWAP_CAM_BUFFERS = true; // Переключение флага
+            processing = false; // Завершение обработки
+        } catch (e) {
+            console.error("Error updating camera buffer:", e);
+            processing = false;
+        }
+    }
+};
+
+worker.postMessage({init:{cameraQuat:[...cameraQuat],cameraPosition:[...cameraPos]}});
+
+
+let isUpdating = false;
+
+
+function swapCamBuffers(){
+    [cameraBuffer1,cameraBuffer2] = [cameraBuffer2,cameraBuffer1];
+    gl.bindBufferBase(gl.UNIFORM_BUFFER, CAMERA_BINDING_POINT, cameraBuffer1);
+    SWAP_CAM_BUFFERS=false;
+
+}
+
+        // Рендер
+function render(currentTime) { 
+            if (!RENDER) {
+                lastTime = currentTime;
+                requestAnimFrame(render);
+            }   
+            SWAP_CAM_BUFFERS&&swapCamBuffers();
+            gl.viewport(0, 0,  canvas.width*scaleFactor, canvas.height*scaleFactor);
+            geometryPass();
+            gl.viewport(0, 0,  canvas.width, canvas.height);
+            lightingPass();
+            deltaTime = currentTime - (lastTime||0);
+            lastTime = currentTime;
+            moveCamera();
+            requestAnimFrame(render);       
+}
+
+
+
+        document.addEventListener('mousemove',(e)=>{
+         document.pointerLockElement === canvas&&handleInput(e);
+        });
+
+        
+        document.addEventListener('keydown', (event) => {
+            if(document.pointerLockElement === canvas) {
+                MOVE_CAMERA=true;
+                keysPressed[event.code] = true;
+            }
+        });
+
+        document.addEventListener('keyup', (event) => {
+            if(document.pointerLockElement === canvas) {
+                MOVE_CAMERA=false;
+                keysPressed[event.code] = false;
+            }
+        });
+
+        function moveCamera(){
+           MOVE_CAMERA&&handleInput(); 
+        };
+
+
+function generateSmoothCube(edgeLength) {
+    const halfEdge = edgeLength * 0.5;
+
+    // 24 вершины (по 4 вершины на каждую грань)
+    const vertices = [
+        // Передняя грань
+        -halfEdge, -halfEdge,  halfEdge,  // 0
+         halfEdge, -halfEdge,  halfEdge,  // 1
+         halfEdge,  halfEdge,  halfEdge,  // 2
+        -halfEdge,  halfEdge,  halfEdge,  // 3
+        
+        // Задняя грань
+        -halfEdge, -halfEdge, -halfEdge,  // 4
+         halfEdge, -halfEdge, -halfEdge,  // 5
+         halfEdge,  halfEdge, -halfEdge,  // 6
+        -halfEdge,  halfEdge, -halfEdge,  // 7
+        
+        // Левая грань
+        -halfEdge, -halfEdge,  halfEdge,  // 8
+        -halfEdge,  halfEdge,  halfEdge,  // 9
+        -halfEdge,  halfEdge, -halfEdge,  // 10
+        -halfEdge, -halfEdge, -halfEdge,  // 11
+
+        // Правая грань
+         halfEdge, -halfEdge,  halfEdge,  // 12
+         halfEdge,  halfEdge,  halfEdge,  // 13
+         halfEdge,  halfEdge, -halfEdge,  // 14
+         halfEdge, -halfEdge, -halfEdge,  // 15
+
+        // Верхняя грань
+        -halfEdge,  halfEdge,  halfEdge,  // 16
+         halfEdge,  halfEdge,  halfEdge,  // 17
+         halfEdge,  halfEdge, -halfEdge,  // 18
+        -halfEdge,  halfEdge, -halfEdge,  // 19
+
+        // Нижняя грань
+        -halfEdge, -halfEdge,  halfEdge,  // 20
+         halfEdge, -halfEdge,  halfEdge,  // 21
+         halfEdge, -halfEdge, -halfEdge,  // 22
+        -halfEdge, -halfEdge, -halfEdge   // 23
+    ];
+
+    // Индексы (с учётом 24 вершин)
+    const indices = [
+        0, 1, 2,  2, 3, 0,  // Передняя грань
+        6, 5, 4,  4, 7, 6,  // Задняя грань
+        8, 9, 10, 10, 11, 8,  // Левая грань
+        14, 13, 12, 12, 15, 14,  // Правая грань
+        16, 17, 18, 18, 19, 16,  // Верхняя грань
+        22, 21, 20, 20, 23, 22   // Нижняя грань
+    ];
+
+    // Нормали для каждой грани (уникальные для каждой вершины)
+    const normals = [
+        // Передняя грань
+        0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 0, 1,
+        // Задняя грань
+        0, 0, -1,  0, 0, -1,  0, 0, -1,  0, 0, -1,
+        // Левая грань
+        -1, 0, 0,  -1, 0, 0,  -1, 0, 0,  -1, 0, 0,
+        // Правая грань
+        1, 0, 0,  1, 0, 0,  1, 0, 0,  1, 0, 0,
+        // Верхняя грань
+        0, 1, 0,  0, 1, 0,  0, 1, 0,  0, 1, 0,
+        // Нижняя грань
+        0, -1, 0,  0, -1, 0,  0, -1, 0,  0, -1, 0
+    ];
+  /*
+    for (var i=0;i<normals.length;i++) {
+        normals[i]=0;
+    }
+  */
+  const checkerPattern = new Float32Array([
+    0.9, 0.9, 0.9, 0.9,  // Белый
+    0.1, 0.1, 0.1, 0.9,  // Чёрный
+    0.1, 0.1, 0.1, 0.9,  // Чёрный
+    0.9, 0.9, 0.9, 0.9,  // Белый
+
+    0.1, 0.1, 0.1, 0.9,  // Чёрный
+    0.9, 0.9, 0.9, 0.9,  // Белый
+    0.9, 0.9, 0.9, 0.9,  // Белый
+    0.1, 0.1, 0.1, 0.9,  // Чёрный
+
+    0.1, 0.1, 0.1, 0.9,  // Чёрный
+    0.9, 0.9, 0.9, 0.9,  // Белый
+    0.9, 0.9, 0.9, 0.9,  // Белый
+    0.1, 0.1, 0.1, 0.9,  // Чёрный
+
+    0.9, 0.9, 0.9, 0.9,  // Белый
+    0.1, 0.1, 0.1, 0.9,  // Чёрный
+    0.1, 0.1, 0.1, 0.9,  // Чёрный
+    0.9, 0.9, 0.9, 0.9   // Белый
+]);
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D,texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,4,4,0,gl.RGBA,gl.FLOAT,checkerPattern);
+    gl.generateMipmap(gl.TEXTURE_2D);
+   
+
+    const texCoords = [
+    // Передняя грань
+    0.0, 0.0, // Нижний левый угол
+    1.0, 0.0, // Нижний правый угол
+    1.0, 1.0, // Верхний правый угол
+    0.0, 1.0, // Верхний левый угол
+
+    // Задняя грань
+    1.0, 0.0, // Нижний левый угол
+    0.0, 0.0, // Нижний правый угол
+    0.0, 1.0, // Верхний правый угол
+    1.0, 1.0, // Верхний левый угол
+
+    // Верхняя грань
+    0.0, 1.0, // Нижний левый угол
+    1.0, 1.0, // Нижний правый угол
+    1.0, 0.0, // Верхний правый угол
+    0.0, 0.0, // Верхний левый угол
+
+    // Нижняя грань
+    1.0, 1.0, // Нижний левый угол
+    0.0, 1.0, // Нижний правый угол
+    0.0, 0.0, // Верхний правый угол
+    1.0, 0.0, // Верхний левый угол
+
+    // Правая грань
+    1.0, 0.0, // Нижний левый угол
+    1.0, 1.0, // Нижний правый угол
+    0.0, 1.0, // Верхний правый угол
+    0.0, 0.0, // Верхний левый угол
+
+    // Левая грань
+    0.0, 0.0, // Нижний левый угол
+    0.0, 1.0, // Нижний правый угол
+    1.0, 1.0, // Верхний правый угол
+    1.0, 0.0  // Верхний левый угол
+];
+
+const texCoords2 = [
+    // Передняя грань (левая верхняя часть текстуры)
+    0.0, 0.5, // Нижний левый угол
+    0.33, 0.5, // Нижний правый угол
+    0.33, 1.0, // Верхний правый угол
+    0.0, 1.0, // Верхний левый угол
+
+    // Задняя грань (средняя верхняя часть текстуры)
+    0.33, 0.5, // Нижний левый угол
+    0.66, 0.5, // Нижний правый угол
+    0.66, 1.0, // Верхний правый угол
+    0.33, 1.0, // Верхний левый угол
+
+    // Верхняя грань (правая верхняя часть текстуры)
+    0.66, 0.5, // Нижний левый угол
+    1.0, 0.5, // Нижний правый угол
+    1.0, 1.0, // Верхний правый угол
+    0.66, 1.0, // Верхний левый угол
+
+    // Нижняя грань (левая нижняя часть текстуры)
+    0.0, 0.0, // Нижний левый угол
+    0.33, 0.0, // Нижний правый угол
+    0.33, 0.5, // Верхний правый угол
+    0.0, 0.5, // Верхний левый угол
+
+    // Правая грань (средняя нижняя часть текстуры)
+    0.33, 0.0, // Нижний левый угол
+    0.66, 0.0, // Нижний правый угол
+    0.66, 0.5, // Верхний правый угол
+    0.33, 0.5, // Верхний левый угол
+
+    // Левая грань (правая нижняя часть текстуры)
+    0.66, 0.0, // Нижний левый угол
+    1.0, 0.0, // Нижний правый угол
+    1.0, 0.5, // Верхний правый угол
+    0.66, 0.5  // Верхний левый угол
+];
+    return {
+        vertices: new Float32Array(vertices),
+        indices: new Uint16Array(indices),
+        normals: new Float32Array(normals),
+        texcoords: new Float32Array(texCoords),
+        texture: texture
+    };
+}
+
+
+    </script>
+</body>
+</html>
