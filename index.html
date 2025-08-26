@@ -1,13 +1,15 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <script src="coi-serviceworker.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebGL2 Камера от первого лица</title>
     <style>
-        canvas { display: block; margin: auto; }
+        canvas { display: flex; margin: auto; }
         body, html { margin: 0; height: 100%; overflow: hidden; }
+        .hide {
+            display: none !important;
+        }
     </style>
 </head>
 <body style="
@@ -16,7 +18,8 @@
     height: auto;
 ">
     <canvas id="glCanvas"></canvas>
-<div style="
+    <span id="fallback" style="position: absolute;top: 50%;left: 50%;transform: translate(-50%,-50%);color: red;font-family: sans-serif;font-size: 2rem;width: 90%;text-align: center;">Hi! If you see this text, WebGL2 is not supported in your browser</span>
+<div id="overlay" class="hide" style="
     position: absolute;
     inset: 1rem;
     pointer-events: none;
@@ -25,7 +28,15 @@
     outline-offset: .5rem;
     border: .11rem dashed #080f;
     display: flex;
-">
+"><div style="
+    position: absolute;
+    inset: auto 1rem 1rem;
+    font-size: .8rem;
+    font-family: serif;
+    color: white;
+    text-align: center;
+">FPS STYLE CAMERA DEMO<br>Click/Esc to enter/exit<br>WSAD - moves camera<br>Ctrl+A, Ctrl+D - rotates camera along it's z-axis<br>Mouse movement controls camera orientaion</div>
+    
 <div style="margin: auto;width: .66rem;height: .66rem;border-radius: 100%;box-shadow: 0 0 2mm 2mm #fff4;outline: .5mm solid #fff7;outline-offset: -1mm;">
 </div>
 </div>
@@ -51,6 +62,9 @@
 
         if (!gl) {
             alert('WebGL2 не поддерживается вашим браузером');
+        } else {
+            document.getElementById("fallback").classList.toggle("hide");
+            document.getElementById("overlay").classList.toggle("hide");
         }
         let ext = gl.getExtension('EXT_color_buffer_float');
         if (!ext) {
