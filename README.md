@@ -20,4 +20,4 @@ Mouse movement controls camera orientaion
 
 ***
 
-This is a realisation of a simple deferred rendering (geometry pass + lighting pass); camera math is done using quaternion operations.
+This is a realization of a simple deferred rendering (geometry pass + lighting pass); camera math is done using quaternion operations.
