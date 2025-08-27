@@ -2,6 +2,8 @@
 
 ***
 
+This is a realization of a simple deferred rendering (geometry pass + lighting pass); camera math is done using quaternion operations.
+
 Pure HTML/Javascript
 
 ***
@@ -20,4 +22,3 @@ Mouse movement controls camera orientaion
 
 ***
 
-This is a realization of a simple deferred rendering (geometry pass + lighting pass); camera math is done using quaternion operations.
