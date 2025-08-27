@@ -16,4 +16,4 @@ Mouse movement controls camera orientaion
 
 ***
 
-SharedArrayBuffer is used here, the coi-serviceworker.js is to deal with CORS  (to allow your browser's Javascript engine to use the SharedArrayBuffer)
+[SharedArrayBuffer](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer) is used here, the coi-serviceworker.js is to deal with CORS  (to allow your browser's Javascript engine to use the SharedArrayBuffer)
