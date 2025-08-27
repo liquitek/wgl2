@@ -17,3 +17,7 @@ Mouse movement controls camera orientaion
 ***
 
 [SharedArrayBuffer](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer) is used here, the [coi-serviceworker.js](https://github.com/gzuidhof/coi-serviceworker) is to deal with CORS  (to allow your browser's Javascript engine to use the SharedArrayBuffer)
+
+***
+
+This is a realisation of a simple deferred rendering (geometry pass + lighting pass); camera math is done using quaternion operations.
